@@ -15,11 +15,11 @@ import (
 )
 
 type Block struct {
-	Height            int       `json:"height"`
-	Version           string    `json:"version"`
-	ChainID           string    `json:"chain_id"`
-	Time              time.Time `json:"time"`
-	ProposerAddressRaw string   `json:"proposer_address_raw"`
+	Height             int       `json:"height"`
+	Version            string    `json:"version"`
+	ChainID            string    `json:"chain_id"`
+	Time               time.Time `json:"time"`
+	ProposerAddressRaw string    `json:"proposer_address_raw"`
 }
 
 func InitEnv() {
@@ -53,6 +53,7 @@ func writeBlockToInfluxDB(client influxdb2.Client, block Block) {
 			"height": block.Height,
 			"time":   block.Time.Format(time.RFC3339),
 		}, block.Time)
+	log.Printf("Writing block with height %d to InfluxDB", block.Height)
 	writeAPI.WritePoint(p)
 	writeAPI.Flush()
 	log.Printf("Block written to InfluxDB: %v\n", block.Height)
@@ -61,6 +62,7 @@ func writeBlockToInfluxDB(client influxdb2.Client, block Block) {
 func getExistingBlocks(client influxdb2.Client, startBlock, endBlock int) ([]int, error) {
 	queryAPI := client.QueryAPI(os.Getenv("INFLUXDB_INIT_ORG"))
 	query := fmt.Sprintf(`from(bucket:"%s") |> range(start: -1y) |> filter(fn: (r) => r._measurement == "blocks2") |> filter(fn: (r) => r.height >= %d and r.height <= %d) |> keep(columns: ["height"]) |> distinct(column: "height")`, os.Getenv("INFLUXDB_INIT_BUCKET"), startBlock, endBlock)
+	log.Printf("Querying existing blocks from %d to %d", startBlock, endBlock)
 	result, err := queryAPI.Query(context.Background(), query)
 	if err != nil {
 		return nil, err
@@ -74,6 +76,7 @@ func getExistingBlocks(client influxdb2.Client, startBlock, endBlock int) ([]int
 	if result.Err() != nil {
 		return nil, result.Err()
 	}
+	log.Printf("Found %d existing blocks", len(blocks))
 	return blocks, nil
 }
 
@@ -102,7 +105,7 @@ func fetchLastBlockNumber() (int, error) {
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return 0, fmt.Errorf("failed to decode response: %v", err)
 	}
-
+	log.Printf("Latest Block-height: %d", result.Data.LatestBlockHeight)
 	return result.Data.LatestBlockHeight, nil
 }
 
@@ -143,7 +146,9 @@ func verifyAndInsertBlocks(client influxdb2.Client, startBlock int) {
 			continue
 		}
 
+		log.Printf("Checking for existing blocks starting from block %d", startBlock)
 		if len(existingBlocks) < 10 {
+			log.Printf("Less than 10 blocks found, fetching more blocks")
 			blocks, err := fetchBlockDataFromAPI(startBlock, startBlock+10)
 			if err != nil {
 				log.Printf("Error fetching block data: %v", err)
@@ -162,6 +167,7 @@ func verifyAndInsertBlocks(client influxdb2.Client, startBlock int) {
 			log.Printf("Error fetching last block number: %v", err)
 			break
 		}
+		log.Printf("Updated start block to %d and last block number %d", startBlock, lastBlock)
 		if startBlock > lastBlock {
 			break
 		}
