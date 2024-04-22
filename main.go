@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
 	"log"
 	"net/http"
 	"os"
@@ -183,7 +182,7 @@ func verifyAndInsertBlocks(client influxdb2.Client, startBlock int) {
 		// Adjust startBlock here based on condition
 		if startBlock+10 > lastBlock {
 			log.Printf("Reached last known block number %d, waiting for new blocks to be generated...", lastBlock)
-			time.Sleep(1 * time.Minute)
+			time.Sleep(10 * time.Second)
 			continue // After waiting, it continues without incrementing startBlock prematurely
 		}
 
@@ -211,7 +210,7 @@ func fetchTransactionData(client *http.Client, fromHeight, toHeight int) ([]Tran
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	log.Printf("Sending GraphQL query: %s", reqBody)
+	// log.Printf("Sending GraphQL query: %s", reqBody)
 
 	resp, err := client.Do(req)
 	if err != nil {
@@ -219,39 +218,16 @@ func fetchTransactionData(client *http.Client, fromHeight, toHeight int) ([]Tran
 	}
 	defer resp.Body.Close()
 
-	responseBody := readResponseBody(resp)
-	log.Printf("Response from server: %s", responseBody)
-
-	if resp.StatusCode != http.StatusOK {
-		log.Printf("Received non-OK HTTP status: %d. Response Body: %s", resp.StatusCode, responseBody)
-		return nil, fmt.Errorf("received non-OK HTTP status: %d", resp.StatusCode)
-	}
-
 	var result struct {
 		Data struct {
 			Transactions []Transaction `json:"transactions"`
 		} `json:"data"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil { //borrar
-		body, _ := ioutil.ReadAll(resp.Body) // Read the body for logging
-		log.Printf("Failed to decode response: %v. Response body: %s", err, string(body))
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return nil, fmt.Errorf("failed to decode response: %v", err)
 	}
 	log.Printf("Decoded %d transactions", len(result.Data.Transactions))
 	return result.Data.Transactions, nil
-}
-
-func readResponseBody(resp *http.Response) string { //borrrar
-	bodyBytes, err := ioutil.ReadAll(resp.Body)
-	if err != nil {
-		log.Printf("Error reading response body: %v", err)
-		return ""
-	}
-	// Convertimos el cuerpo a string para poder loguearlo
-	bodyString := string(bodyBytes)
-	// Restablecemos el cuerpo del response para que pueda ser leído de nuevo si es necesario
-	resp.Body = ioutil.NopCloser(bytes.NewBuffer(bodyBytes))
-	return bodyString
 }
 
 func writeTransactionToInfluxDB(client influxdb2.Client, tx Transaction) {
@@ -275,7 +251,6 @@ func writeTransactionToInfluxDB(client influxdb2.Client, tx Transaction) {
 func verifyAndInsertTransactions(client influxdb2.Client, startBlock int) {
 	httpClient := &http.Client{}
 	for {
-		// Obtener el último número de bloque
 		lastBlock, err := fetchLastBlockNumber()
 		if err != nil {
 			log.Printf("Error fetching last block number for transactions: %v", err)
@@ -283,14 +258,18 @@ func verifyAndInsertTransactions(client influxdb2.Client, startBlock int) {
 			continue
 		}
 
-		// Si el bloque inicial ya está más allá del último bloque conocido, esperar por nuevos bloques
 		if startBlock > lastBlock {
 			log.Printf("Reached last known block number %d, waiting for new blocks to be generated...", lastBlock)
 			time.Sleep(1 * time.Minute) // Espera para dar tiempo a que se generen nuevos bloques
 			continue
 		}
 
-		transactions, err := fetchTransactionData(httpClient, startBlock, startBlock+99)
+		upperBlock := startBlock + 99
+		if upperBlock > lastBlock {
+			upperBlock = lastBlock
+		}
+
+		transactions, err := fetchTransactionData(httpClient, startBlock, upperBlock)
 		if err != nil {
 			log.Printf("Error fetching transaction data: %v", err)
 			time.Sleep(1 * time.Minute) // Espera antes de reintentar
@@ -301,16 +280,24 @@ func verifyAndInsertTransactions(client influxdb2.Client, startBlock int) {
 			writeTransactionToInfluxDB(client, tx)
 		}
 
-		// Actualizar el bloque inicial para la siguiente iteración
-		startBlock += 100
+		if len(transactions) > 0 {
+			startBlock = transactions[len(transactions)-1].BlockHeight + 1
+		} else {
+			startBlock = upperBlock + 1 // Si no se encontraron transacciones, avanza al siguiente rango
+		}
+
+		if startBlock > lastBlock {
+			log.Printf("Waiting for new blocks as startBlock %d is beyond the last known block %d...", startBlock, lastBlock)
+			time.Sleep(1 * time.Minute)
+		}
 	}
 }
 
 func main() {
 	InitEnv()
 	client := ConnectToInfluxDB()
-	go verifyAndInsertBlocks(client, 101900)
-	//go verifyAndInsertTransactions(client, 1)
+	go verifyAndInsertBlocks(client, 102700)
+	go verifyAndInsertTransactions(client, 100000)
 
 	select {}
 }
