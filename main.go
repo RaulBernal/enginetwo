@@ -334,7 +334,7 @@ func writeTransactionToSQLite(db *sql.DB, tx Transaction) {
 	defer stmt.Close()
 
 	for _, msg := range tx.Messages {
-		_, err = stmt.Exec(tx.BlockHeight, tx.Index, blockTime.Format(time.RFC3339), msg.Value.Amount, msg.Value.FromAddress, msg.Value.ToAddress)
+		_, err = stmt.Exec(tx.BlockHeight, tx.Index, blockTime.Format(time.DateTime), msg.Value.Amount, msg.Value.FromAddress, msg.Value.ToAddress)
 		if err != nil {
 			log.Printf("Failed to insert transaction for block height %d, tx_index %d: %v", tx.BlockHeight, tx.Index, err)
 			return
