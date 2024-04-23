@@ -78,7 +78,7 @@ func writeBlockToSQLite(db *sql.DB, block Block) {
 	}
 	defer stmt.Close()
 
-	res, err := stmt.Exec(block.Height, block.Time.Format(time.RFC3339), block.Version, block.ChainID, block.ProposerAddressRaw)
+	res, err := stmt.Exec(block.Height, block.Time.Format(time.DateTime), block.Version, block.ChainID, block.ProposerAddressRaw)
 	if err != nil {
 		log.Fatal(err)
 	}
