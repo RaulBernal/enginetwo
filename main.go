@@ -146,7 +146,7 @@ func getBlockTime(db *sql.DB, blockHeight int) (time.Time, error) {
 	}
 
 	// Convertir el string de tiempo a time.Time
-	blockTime, err := time.Parse(time.RFC3339, blockTimeString)
+	blockTime, err := time.Parse(time.DateTime, blockTimeString)
 	if err != nil {
 		log.Printf("Error parsing block time string for height %d: %v", blockHeight, err)
 		return time.Time{}, err
