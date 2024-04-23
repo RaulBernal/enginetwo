@@ -32,7 +32,8 @@ type Transaction struct {
 	} `json:"messages"`
 }
 
-const graphql_endpoint string = "http://89.117.57.206:8546/graphql/query"
+// const graphql_endpoint string = "http://89.117.57.206:8546/graphql/query" test
+const graphql_endpoint string = "http://localhost:8546/graphql/query"
 const sqlite3_file string = "./data.sqlite3"
 
 func connectToSQLite() *sql.DB {
