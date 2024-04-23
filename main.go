@@ -2,16 +2,14 @@ package main
 
 import (
 	"bytes"
-	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
-	"os"
 	"time"
 
-	influxdb2 "github.com/influxdata/influxdb-client-go/v2"
-	"github.com/joho/godotenv"
+	_ "github.com/mattn/go-sqlite3"
 )
 
 type Block struct {
@@ -34,69 +32,132 @@ type Transaction struct {
 	} `json:"messages"`
 }
 
-func InitEnv() {
-	if err := godotenv.Load("../dev_influxdb.env"); err != nil {
-		log.Fatalf("Error loading .env file: %v", err)
+const graphql_endpoint string = "http://89.117.57.206:8546/graphql/query"
+const sqlite3_file string = "./data.sqlite3"
+
+func connectToSQLite() *sql.DB {
+	db, err := sql.Open("sqlite3", sqlite3_file)
+	if err != nil {
+		log.Fatalf("Error opening database: %v", err)
+		return nil
 	}
-}
 
-func ConnectToInfluxDB() influxdb2.Client {
-	InitEnv()
-	url := os.Getenv("INFLUXDB_URL")
-	token := os.Getenv("INFLUXDB_TOKEN")
-	client := influxdb2.NewClient(url, token)
+	// Create tables if don't exist, with indexes
+	sqlStmt := `
+    CREATE TABLE IF NOT EXISTS transactions (
+		block_height INTEGER,
+		tx_index INTEGER,
+		time TEXT,
+		amount TEXT,
+		from_address TEXT,
+		to_address TEXT,
+		PRIMARY KEY (block_height, tx_index)
+	);
 
-	health, err := client.Health(context.Background())
-	if err != nil || health.Status != "pass" {
-		log.Fatalf("Failed to connect to InfluxDB: %v, Status: %s", err, health.Status)
+    CREATE TABLE IF NOT EXISTS blocks (
+        height INTEGER PRIMARY KEY,
+        time TEXT,
+        version TEXT,
+        chain_id TEXT,
+        proposer_address_raw TEXT
+    );`
+	_, err = db.Exec(sqlStmt)
+	if err != nil {
+		log.Fatalf("%q: %s\n", err, sqlStmt)
+		return nil
 	}
-	log.Println("Connected to InfluxDB successfully")
-	return client
+
+	return db
 }
 
-func writeBlockToInfluxDB(client influxdb2.Client, block Block) {
-	org := os.Getenv("INFLUXDB_INIT_ORG")
-	bucket := os.Getenv("INFLUXDB_INIT_BUCKET")
+func writeBlockToSQLite(db *sql.DB, block Block) {
+	stmt, err := db.Prepare("INSERT INTO blocks(height, time, version, chain_id, proposer_address_raw) VALUES(?,?,?,?,?) ON CONFLICT(height) DO NOTHING")
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer stmt.Close()
 
-	writeAPI := client.WriteAPI(org, bucket)
-	p := influxdb2.NewPoint("blocks2",
-		map[string]string{"proposer_address_raw": block.ProposerAddressRaw},
-		map[string]interface{}{
-			"height": block.Height,
-			"time":   block.Time.Format(time.RFC3339),
-		}, block.Time)
-	log.Printf("Writing block with height %d to InfluxDB", block.Height)
-	writeAPI.WritePoint(p)
-	writeAPI.Flush()
-	log.Printf("Block written to InfluxDB: %v\n", block.Height)
+	res, err := stmt.Exec(block.Height, block.Time.Format(time.RFC3339), block.Version, block.ChainID, block.ProposerAddressRaw)
+	if err != nil {
+		log.Fatal(err)
+	}
+	num, err := res.RowsAffected()
+	if err != nil {
+		log.Fatal(err)
+	}
+	if num == 0 {
+		log.Printf("Block with height %d already exists, skipped", block.Height)
+	} else {
+		log.Printf("Block with height %d inserted", block.Height)
+	}
+
 }
 
-func getExistingBlocks(client influxdb2.Client, startBlock, endBlock int) ([]int, error) {
-	queryAPI := client.QueryAPI(os.Getenv("INFLUXDB_INIT_ORG"))
-	query := fmt.Sprintf(`from(bucket:"%s") |> range(start: -1y) |> filter(fn: (r) => r._measurement == "blocks2") |> filter(fn: (r) => r.height >= %d and r.height <= %d) |> keep(columns: ["height"]) |> distinct(column: "height")`, os.Getenv("INFLUXDB_INIT_BUCKET"), startBlock, endBlock)
-	log.Printf("Querying existing blocks from %d to %d", startBlock, endBlock)
-	result, err := queryAPI.Query(context.Background(), query)
+func getExistingBlocks(db *sql.DB, startBlock, endBlock int) ([]int, error) {
+	var blocks []int
+	query := `SELECT height FROM blocks WHERE height BETWEEN ? AND ?`
+	rows, err := db.Query(query, startBlock, endBlock)
 	if err != nil {
 		return nil, err
 	}
-	defer result.Close()
+	defer rows.Close()
 
-	var blocks []int
-	for result.Next() {
-		blocks = append(blocks, int(result.Record().ValueByKey("height").(int64)))
+	var height int
+	for rows.Next() {
+		if err := rows.Scan(&height); err != nil {
+			return nil, err
+		}
+		blocks = append(blocks, height)
 	}
-	if result.Err() != nil {
-		return nil, result.Err()
+	if err = rows.Err(); err != nil {
+		return nil, err
 	}
-	log.Printf("Found %d existing blocks", len(blocks))
+
 	return blocks, nil
 }
 
-func fetchLastBlockNumber() (int, error) {
+func fetchLastBlockHeightFromDB(db *sql.DB) (int, error) {
+	var lastBlockHeight int
+	query := `SELECT height FROM blocks ORDER BY height DESC LIMIT 1`
+	err := db.QueryRow(query).Scan(&lastBlockHeight)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			// No rows found, significa que no hay bloques, se puede manejar según sea necesario
+			return 0, nil
+		}
+		log.Printf("Error fetching last block height from database: %v", err)
+		return 0, err
+	}
+	log.Printf("Latest Block-height from DB: %d", lastBlockHeight)
+	return lastBlockHeight, nil
+}
+
+func getBlockTime(db *sql.DB, blockHeight int) (time.Time, error) {
+	// Declarar la variable antes de usarla
+	var blockTimeString string
+
+	// Consulta para obtener el tiempo del bloque como un string
+	query := `SELECT time FROM blocks WHERE height = ?`
+	err := db.QueryRow(query, blockHeight).Scan(&blockTimeString)
+	if err != nil {
+		log.Printf("Error fetching block time for height %d: %v", blockHeight, err)
+		return time.Time{}, err
+	}
+
+	// Convertir el string de tiempo a time.Time
+	blockTime, err := time.Parse(time.RFC3339, blockTimeString)
+	if err != nil {
+		log.Printf("Error parsing block time string for height %d: %v", blockHeight, err)
+		return time.Time{}, err
+	}
+
+	return blockTime, nil
+}
+
+func fetchLastBlockNumber() (int, error) { //TODO: maybe get the latest -1 to ensure stability
 	query := `query { latestBlockHeight }`
-	endpoint := "http://89.117.57.206:8546/graphql/query"
 	reqBody := fmt.Sprintf(`{"query": "%s"}`, query)
-	req, err := http.NewRequest("POST", endpoint, bytes.NewBufferString(reqBody))
+	req, err := http.NewRequest("POST", graphql_endpoint, bytes.NewBufferString(reqBody))
 	if err != nil {
 		return 0, fmt.Errorf("failed to create request: %v", err)
 	}
@@ -124,7 +185,7 @@ func fetchLastBlockNumber() (int, error) {
 func fetchBlockDataFromAPI(fromHeight, toHeight int) ([]Block, error) {
 	query := fmt.Sprintf(`{ blocks(filter: { from_height: %d, to_height: %d }) { time height version chain_id proposer_address_raw } }`, fromHeight, toHeight)
 	reqBody := fmt.Sprintf(`{"query": "%s"}`, query)
-	req, err := http.NewRequest("POST", "http://89.117.57.206:8546/graphql/query", bytes.NewBufferString(reqBody))
+	req, err := http.NewRequest("POST", graphql_endpoint, bytes.NewBufferString(reqBody))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %v", err)
 	}
@@ -149,44 +210,58 @@ func fetchBlockDataFromAPI(fromHeight, toHeight int) ([]Block, error) {
 	return result.Data.Blocks, nil
 }
 
-func verifyAndInsertBlocks(client influxdb2.Client, startBlock int) {
+func verifyAndInsertBlocks(db *sql.DB, startBlock int) {
 	for {
-		existingBlocks, err := getExistingBlocks(client, startBlock, startBlock+9)
+		// Log para seguir cuáles rangos se están verificando
+		log.Printf("Checking existing blocks from height %d to %d", startBlock, startBlock+9)
+
+		// Obtener bloques existentes en el rango deseado
+		existingBlocks, err := getExistingBlocks(db, startBlock, startBlock+9)
 		if err != nil {
 			log.Printf("Error checking existing blocks: %v", err)
 			time.Sleep(1 * time.Minute) // Espera antes de reintentar para no sobrecargar el servidor
 			continue
 		}
 
-		log.Printf("Checking for existing blocks starting from block %d", startBlock)
+		var blocks []Block // Declarar blocks aquí para hacerlo disponible en el scope más amplio.
+
+		// Si hay menos de 10 bloques existentes, buscar más datos
 		if len(existingBlocks) < 10 {
-			log.Printf("Less than 10 blocks found, fetching more blocks")
-			blocks, err := fetchBlockDataFromAPI(startBlock, startBlock+9) // adjust this to fetch exactly 10 blocks
+			log.Printf("Fetching new block data from API for blocks %d to %d", startBlock, startBlock+9)
+			blocks, err = fetchBlockDataFromAPI(startBlock, startBlock+9)
 			if err != nil {
 				log.Printf("Error fetching block data: %v", err)
 				continue
 			}
 			for _, block := range blocks {
+				// Solo escribe bloques que no existen ya en la base de datos
 				if !contains(existingBlocks, block.Height) {
-					writeBlockToInfluxDB(client, block)
+					writeBlockToSQLite(db, block)
 				}
 			}
 		}
 
+		// Obtener el número del último bloque disponible desde la API
 		lastBlock, err := fetchLastBlockNumber()
 		if err != nil {
 			log.Printf("Error fetching last block number: %v", err)
 			break
 		}
 
-		// Adjust startBlock here based on condition
+		// Verificar si hemos alcanzado el último bloque conocido
 		if startBlock+10 > lastBlock {
 			log.Printf("Reached last known block number %d, waiting for new blocks to be generated...", lastBlock)
-			time.Sleep(10 * time.Second)
-			continue // After waiting, it continues without incrementing startBlock prematurely
+			time.Sleep(10 * time.Minute) // Espera antes de comprobar de nuevo
+			continue
 		}
 
-		startBlock += 9 // Increment after ensuring we are not at the end
+		// Incrementar el punto de inicio para el siguiente lote de bloques
+		// Asegurar que no omitimos ningún bloque, particularmente los múltiplos de 10
+		if len(blocks) > 0 {
+			startBlock = blocks[len(blocks)-1].Height + 1 // Mover startBlock al siguiente al último bloque insertado/verificado
+		} else {
+			startBlock += 10 // Si no se encontraron bloques nuevos, simplemente moverse al siguiente rango
+		}
 	}
 }
 
@@ -204,7 +279,7 @@ func fetchTransactionData(client *http.Client, fromHeight, toHeight int) ([]Tran
 	query := fmt.Sprintf(`query { transactions(filter: { message: { type_url: send, route: bank }, from_block_height: %d, to_block_height: %d }) { index block_height messages { value { ... on BankMsgSend { amount from_address to_address } } } } }`, fromHeight, toHeight)
 	reqBody := fmt.Sprintf(`{"query": "%s"}`, query)
 
-	req, err := http.NewRequest("POST", "http://89.117.57.206:8546/graphql/query", bytes.NewBufferString(reqBody))
+	req, err := http.NewRequest("POST", graphql_endpoint, bytes.NewBufferString(reqBody))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %v", err)
 	}
@@ -230,37 +305,56 @@ func fetchTransactionData(client *http.Client, fromHeight, toHeight int) ([]Tran
 	return result.Data.Transactions, nil
 }
 
-func writeTransactionToInfluxDB(client influxdb2.Client, tx Transaction) {
-	org := os.Getenv("INFLUXDB_INIT_ORG")
-	bucket := os.Getenv("INFLUXDB_INIT_BUCKET")
+func writeTransactionToSQLite(db *sql.DB, tx Transaction) {
+	var blockTime time.Time
+	var err error
+	maxRetries := 3
+	retryInterval := 1 * time.Minute // Retries starts with 1 minute, and go exponentially
 
-	writeAPI := client.WriteAPI(org, bucket)
-	for _, msg := range tx.Messages {
-		p := influxdb2.NewPoint("tx_send",
-			map[string]string{"from_address": msg.Value.FromAddress, "to_address": msg.Value.ToAddress},
-			map[string]interface{}{
-				"amount":       msg.Value.Amount,
-				"block_height": tx.BlockHeight,
-			}, time.Now())
-		writeAPI.WritePoint(p)
-		log.Printf("Writing transaction for block %d to InfluxDB", tx.BlockHeight)
+	for retries := 0; retries < maxRetries; retries++ {
+		blockTime, err = getBlockTime(db, tx.BlockHeight)
+		if err == nil {
+			break
+		}
+		log.Printf("Failed to get block time for block height %d, retrying... %v", tx.BlockHeight, err)
+		time.Sleep(retryInterval)
+		retryInterval *= 2 // Duplicates the retry interval
 	}
-	writeAPI.Flush()
+
+	if err != nil {
+		log.Printf("Failed to get block time for block height %d after %d retries: %v", tx.BlockHeight, maxRetries, err)
+		return
+	}
+
+	stmt, err := db.Prepare("INSERT INTO transactions(block_height, tx_index, time, amount, from_address, to_address) VALUES(?,?,?,?,?,?) ON CONFLICT(block_height, tx_index) DO NOTHING")
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer stmt.Close()
+
+	for _, msg := range tx.Messages {
+		_, err = stmt.Exec(tx.BlockHeight, tx.Index, blockTime.Format(time.RFC3339), msg.Value.Amount, msg.Value.FromAddress, msg.Value.ToAddress)
+		if err != nil {
+			log.Printf("Failed to insert transaction for block height %d, tx_index %d: %v", tx.BlockHeight, tx.Index, err)
+			return
+		}
+	}
+	log.Printf("Transaction for block %d written to SQLite", tx.BlockHeight)
 }
 
-func verifyAndInsertTransactions(client influxdb2.Client, startBlock int) {
+func verifyAndInsertTransactions(db *sql.DB, startBlock int) {
 	httpClient := &http.Client{}
 	for {
-		lastBlock, err := fetchLastBlockNumber()
+		lastBlock, err := fetchLastBlockHeightFromDB(db)
 		if err != nil {
-			log.Printf("Error fetching last block number for transactions: %v", err)
-			time.Sleep(1 * time.Minute) // Espera antes de reintentar para no sobrecargar el servidor
+			log.Printf("Error fetching last block height from DB: %v", err)
+			time.Sleep(1 * time.Minute)
 			continue
 		}
 
 		if startBlock > lastBlock {
-			log.Printf("Reached last known block number %d, waiting for new blocks to be generated...", lastBlock)
-			time.Sleep(1 * time.Minute) // Espera para dar tiempo a que se generen nuevos bloques
+			log.Printf("Reached last known block height %d, waiting for new blocks to be generated...", lastBlock)
+			time.Sleep(1 * time.Minute)
 			continue
 		}
 
@@ -272,18 +366,18 @@ func verifyAndInsertTransactions(client influxdb2.Client, startBlock int) {
 		transactions, err := fetchTransactionData(httpClient, startBlock, upperBlock)
 		if err != nil {
 			log.Printf("Error fetching transaction data: %v", err)
-			time.Sleep(1 * time.Minute) // Espera antes de reintentar
+			time.Sleep(1 * time.Minute)
 			continue
 		}
 
 		for _, tx := range transactions {
-			writeTransactionToInfluxDB(client, tx)
+			writeTransactionToSQLite(db, tx)
 		}
 
 		if len(transactions) > 0 {
 			startBlock = transactions[len(transactions)-1].BlockHeight + 1
 		} else {
-			startBlock = upperBlock + 1 // Si no se encontraron transacciones, avanza al siguiente rango
+			startBlock = upperBlock + 1
 		}
 
 		if startBlock > lastBlock {
@@ -294,10 +388,13 @@ func verifyAndInsertTransactions(client influxdb2.Client, startBlock int) {
 }
 
 func main() {
-	InitEnv()
-	client := ConnectToInfluxDB()
-	go verifyAndInsertBlocks(client, 102700)
-	go verifyAndInsertTransactions(client, 100000)
+	// Connect or/and init the SQLite database
+	db := connectToSQLite()
+	defer db.Close()
+
+	// Iniciar las goroutines para verificar e insertar bloques y transacciones
+	go verifyAndInsertBlocks(db, 1) // if you break the script update the
+	// go verifyAndInsertTransactions(db, 1)
 
 	select {}
 }
