@@ -393,7 +393,7 @@ func main() {
 	defer db.Close()
 
 	// Iniciar las goroutines para verificar e insertar bloques y transacciones
-	go verifyAndInsertBlocks(db, 115115) // if you break the script update the
+	go verifyAndInsertBlocks(db, 1) // if you break the script update the
 	go verifyAndInsertTransactions(db, 1)
 
 	select {}
