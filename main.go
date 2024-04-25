@@ -32,7 +32,8 @@ type Transaction struct {
 	} `json:"messages"`
 }
 
-// const graphql_endpoint string = "http://89.117.57.206:8546/graphql/query" test
+//const graphql_endpoint string = "http://89.117.57.206:8546/graphql/query"
+
 const graphql_endpoint string = "http://localhost:8546/graphql/query"
 const sqlite3_file string = "./data.sqlite3"
 
@@ -246,13 +247,14 @@ func verifyAndInsertBlocks(db *sql.DB, startBlock int) {
 		lastBlock, err := fetchLastBlockNumber()
 		if err != nil {
 			log.Printf("Error fetching last block number: %v", err)
-			break
+			time.Sleep(1 * time.Minute)
+			continue
 		}
 
 		// Verificar si hemos alcanzado el último bloque conocido
-		if startBlock+10 > lastBlock {
+		if startBlock > lastBlock {
 			log.Printf("Reached last known block number %d, waiting for new blocks to be generated...", lastBlock)
-			time.Sleep(10 * time.Minute) // Espera antes de comprobar de nuevo
+			time.Sleep(1 * time.Minute) // Espera antes de comprobar de nuevo
 			continue
 		}
 
@@ -354,7 +356,7 @@ func verifyAndInsertTransactions(db *sql.DB, startBlock int) {
 		}
 
 		if startBlock > lastBlock {
-			log.Printf("Reached last known block height %d, waiting for new blocks to be generated...", lastBlock)
+			log.Printf("Reached last known block height %d, waiting 1 minute for new blocks to be generated...", lastBlock)
 			time.Sleep(1 * time.Minute)
 			continue
 		}
