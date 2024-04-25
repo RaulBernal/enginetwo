@@ -393,8 +393,8 @@ func main() {
 	db := connectToSQLite()
 	defer db.Close()
 
-	// Iniciar las goroutines para verificar e insertar bloques y transacciones
-	go verifyAndInsertBlocks(db, 1) // if you break the script update the
+	// Init goroutines to verify and insert blocks & transfers
+	go verifyAndInsertBlocks(db, 1) // if you break the script update the block number (last know + 1)
 	go verifyAndInsertTransactions(db, 1)
 
 	select {}
