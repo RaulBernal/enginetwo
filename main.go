@@ -32,10 +32,10 @@ type Transaction struct {
 	} `json:"messages"`
 }
 
-//const graphql_endpoint string = "http://89.117.57.206:8546/graphql/query"
-
-const graphql_endpoint string = "http://localhost:8546/graphql/query"
-const sqlite3_file string = "./data.sqlite3"
+// const graphql_endpoint string = "http://89.117.57.206:8546/graphql/query" // test-host
+// const graphql_endpoint string = "http://localhost:8546/graphql/query" // localhost
+const graphql_endpoint string = "http://tx-indexer:8546/graphql/query" //with docker-compose
+const sqlite3_file string = "/opt/gno/data/data.sqlite3"
 
 func connectToSQLite() *sql.DB {
 	db, err := sql.Open("sqlite3", sqlite3_file)
@@ -124,7 +124,7 @@ func fetchLastBlockHeightFromDB(db *sql.DB) (int, error) {
 	err := db.QueryRow(query).Scan(&lastBlockHeight)
 	if err != nil {
 		if err == sql.ErrNoRows {
-			// No rows found, significa que no hay bloques, se puede manejar según sea necesario
+			// No rows found, significa que no hay bloques
 			return 0, nil
 		}
 		log.Printf("Error fetching last block height from database: %v", err)
@@ -135,7 +135,7 @@ func fetchLastBlockHeightFromDB(db *sql.DB) (int, error) {
 }
 
 func getBlockTime(db *sql.DB, blockHeight int) (time.Time, error) {
-	// Declarar la variable antes de usarla
+
 	var blockTimeString string
 
 	// Consulta para obtener el tiempo del bloque como un string
@@ -254,7 +254,7 @@ func verifyAndInsertBlocks(db *sql.DB, startBlock int) {
 		// Verificar si hemos alcanzado el último bloque conocido
 		if startBlock > lastBlock {
 			log.Printf("Reached last known block number %d, waiting for new blocks to be generated...", lastBlock)
-			time.Sleep(1 * time.Minute) // Espera antes de comprobar de nuevo
+			time.Sleep(30 * time.Second) // Espera antes de comprobar de nuevo
 			continue
 		}
 

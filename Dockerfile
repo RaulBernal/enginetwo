@@ -2,21 +2,23 @@
 # Stage 1: Build
 #===============
 
-FROM golang:1.22-alpine as builder
+FROM ubuntu:latest as builder
 
 COPY . /app
 
 WORKDIR /app
 
-#RUN go build -o enginetwo
-RUN apk add --no-cache gcc g++ git openssh-client
-RUN CGO_ENABLED=1 go build -ldflags="-w -s" -o enginetwo
+RUN apt update && apt install -y sudo wget gcc g++ git
+ADD install_go.sh /app
+RUN /bin/bash install_go.sh
+RUN CGO_ENABLED=1  /usr/local/go/bin/go build -ldflags="-w -s" -o enginetwo
+
 #===============
 # Stage 2: Run
 #===============
 
-FROM golang:1.22-alpine
+FROM ubuntu:latest
 
 COPY --from=builder /app/enginetwo /usr/local/bin/enginetwo
-
-ENTRYPOINT [ "/usr/local/bin/enginetwo" ]
+ADD permissions.sh /opt
+RUN apt update && apt install -y  sudo
